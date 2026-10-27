@@ -1,12 +1,12 @@
-# 译声机 EchoTape for Android
+# 译声机 EchoTape 字幕朗读机 for Android
 
-EchoTape 是一个本机运行的 Android 字幕朗读播放器。用户可以分别选择本地音频和字幕文件，在原声播放到字幕时间点时，使用 Android 系统中文 TTS 朗读字幕。
+译声机 EchoTape 是一个本机运行的 Android 字幕朗读机。用户可以分别选择本地音频和字幕文件，在原声播放到字幕时间点时，使用 Android 系统中文 TTS 朗读字幕。
 
 Android 版本使用原生 Android Views，不依赖 WebView 运行界面。音频后台播放、媒体会话和统一字幕时钟由 Media3 提供。
 
 ## 下载
 
-最新测试版 APK：
+最新发布 APK：
 
 - [GitHub Releases](https://github.com/CiscoZero/subtitles-speaker-for-Android/releases/latest)
 - 最低系统：Android 8.0 / API 26
@@ -111,13 +111,17 @@ LRC 和 TXT 没有可靠的结束时间。当前实现使用文字内容估算�
 
 VTT、SRT、ASS、SSA 不使用该估算，直接读取字幕文件中的结束时间。
 
+## 验证状态
+
+- 已通过 Redmi Note 12 Turbo 真机测试
+- 已验证原生 Android 界面、文件导入、字幕朗读、最近记录和系统 TTS
+
 ## 已知限制
 
 - LRC/TXT 的结束时间只是估算值。
-- 小米及其他厂商系统可能限制后台运行，需要将 EchoTape 设为允许后台运行。
+- 部分厂商系统可能限制后台运行，建议将 EchoTape 设为允许后台运行。
 - 系统 TTS 是否支持某种语音、语速和离线语音包取决于设备安装的 TTS 引擎。
 - 当前 APK 为 Debug 签名测试包。
-- Redmi Note 12 Turbo 真机后台播放、锁屏控制和长时间时钟漂移仍需持续验收。
 
 ## 隐私
 

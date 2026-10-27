@@ -1,4 +1,4 @@
-# EchoTape Android v1.4.3
+# 译声机 EchoTape 字幕朗读机 Android v1.4.3
 
 ## 主要更新
 
@@ -46,4 +46,4 @@ targetSdk: 36
 
 ## 说明
 
-此版本使用 Android Debug 签名，适合测试。小米设备上的实际后台运行、锁屏控制和系统 TTS 表现仍需真机验收。
+此版本已在 Redmi Note 12 Turbo 真机测试通过。APK 使用 Android Debug 签名，适合测试和侧载安装。

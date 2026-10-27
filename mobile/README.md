@@ -1,4 +1,4 @@
-# EchoTape Android
+# 译声机 EchoTape 字幕朗读机 Android
 
 Android 应用使用原生 Android Views，不启动 WebView。React/TypeScript 源码仍保留在仓库根目录，用于 Windows/Web 和共享算法测试。
 
