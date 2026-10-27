@@ -1,0 +1,8 @@
+{
+  "appId": "com.echotape.android",
+  "appName": "EchoTape",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}

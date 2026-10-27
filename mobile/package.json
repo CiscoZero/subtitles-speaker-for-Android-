@@ -1,0 +1,19 @@
+{
+  "name": "echotape-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "build:web": "pnpm --dir .. build && node scripts/sync-web.mjs",
+    "sync": "pnpm build:web && node scripts/cap-sync.mjs",
+    "build:debug": "pnpm sync && cd android && gradlew.bat assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.3",
+    "@capacitor/core": "8.5.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3"
+  }
+}

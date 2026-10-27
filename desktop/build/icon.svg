@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="EchoTape">
+  <rect width="512" height="512" rx="112" fill="#F4E7CE" />
+  <rect x="64" y="128" width="384" height="256" rx="44" fill="#2E2118" />
+  <rect x="96" y="160" width="320" height="132" rx="26" fill="#F4E7CE" />
+  <circle cx="176" cy="226" r="42" fill="#C2622F" />
+  <circle cx="176" cy="226" r="14" fill="#F4E7CE" />
+  <circle cx="336" cy="226" r="42" fill="#C2622F" />
+  <circle cx="336" cy="226" r="14" fill="#F4E7CE" />
+  <rect x="168" y="216" width="176" height="20" rx="10" fill="#2E2118" opacity="0.25" />
+  <rect x="128" y="318" width="256" height="34" rx="17" fill="#C2622F" />
+  <circle cx="160" cy="335" r="7" fill="#F4E7CE" />
+  <circle cx="352" cy="335" r="7" fill="#F4E7CE" />
+</svg>

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#F4E9D8" />
+    <meta
+      name="description"
+      content="译声机 EchoTape —— 中文字幕辅助听力播放器：原声播放到字幕点自动暂停，用中文朗读字幕，读完自动继续原声。全部在本机处理。"
+    />
+    <title>译声机 EchoTape · 中文字幕辅助听力播放器</title>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <div
+      id="boot-fallback"
+      role="status"
+      style="position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px;background:#efe2cc;color:#2e211c;font-family:system-ui,sans-serif;text-align:center"
+    >
+      <div style="display:grid;place-items:center;width:56px;height:56px;border-radius:18px;background:#bf5b2e;color:#fcf6ea;font-weight:900;font-size:22px">译</div>
+      <h1 style="margin:16px 0 6px;font-size:22px">译声机</h1>
+      <p id="boot-message" style="margin:0;max-width:320px;font-size:13px;line-height:1.7;color:#7c6153">正在载入界面…</p>
+    </div>
+    <script>
+      (() => {
+        const message = document.getElementById("boot-message");
+        const show = (text) => {
+          if (message) message.textContent = text;
+        };
+        window.addEventListener("error", (event) => {
+          show("启动失败：" + (event.message || "脚本无法执行") + "。请重新打开应用；若仍失败，请反馈此提示。");
+        });
+        window.addEventListener("unhandledrejection", (event) => {
+          const reason = event.reason && (event.reason.message || String(event.reason));
+          show("启动失败：" + (reason || "异步脚本错误") + "。请重新打开应用。");
+        });
+        window.setTimeout(() => {
+          const root = document.getElementById("root");
+          if (root && root.childElementCount === 0) {
+            const chromeVersion = (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1] || "未知";
+            show(
+              "界面加载超时。检测到的 Android WebView 版本：Chrome/" +
+                chromeVersion +
+                "。请在系统设置中更新 Android System WebView 或 Chrome；仍无效时，在开发者选项中将 WebView 实现切换为 Chrome。"
+            );
+          }
+        }, 8000);
+      })();
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,56 @@
+{
+  "name": "echotape-desktop",
+  "productName": "EchoTape",
+  "version": "1.0.0",
+  "private": true,
+  "description": "译声机 EchoTape 桌面版（Electron + Windows SAPI 中文朗读）",
+  "author": "EchoTape",
+  "license": "MIT",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "build:web": "npm --prefix .. run build && node scripts/sync-web.cjs",
+    "start": "npm run build:web && electron .",
+    "check-voice": "node scripts/check-voice.cjs",
+    "dist": "npm run build:web && electron-builder --win",
+    "dist:portable": "npm run build:web && electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.echotape.desktop",
+    "productName": "EchoTape",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "web/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "译声机 EchoTape"
+    }
+  }
+}
