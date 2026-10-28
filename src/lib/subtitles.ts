@@ -12,11 +12,13 @@ export type Cue = {
 };
 
 export type SubtitleFormat = "vtt" | "srt" | "ass" | "lrc" | "txt";
+export type SourceLanguage = "auto" | "zh" | "ja" | "ko" | "en" | "other";
 
 export type SubtitleParseResult = {
   format: SubtitleFormat;
   cues: Cue[];
   warnings: string[];
+  sourceLanguage: string;
 };
 
 const CJK = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
@@ -162,7 +164,7 @@ function parseAss(raw: string): Cue[] {
   return cues;
 }
 
-function parsePlainText(raw: string, warnings: string[]): Cue[] {
+function parsePlainText(raw: string, warnings: string[], language: SourceLanguage): Cue[] {
   const lines = raw
     .replace(/\r\n?/g, "\n")
     .split("\n")
@@ -171,7 +173,7 @@ function parsePlainText(raw: string, warnings: string[]): Cue[] {
   const cues: Cue[] = [];
   let cursor = 0.6;
   for (const line of lines) {
-    const duration = estimateDurationSeconds(line);
+    const duration = estimateDurationSeconds(line, language);
     cues.push({ id: cues.length, start: cursor, end: cursor + duration, text: line });
     cursor += duration + 0.2;
   }
@@ -179,7 +181,7 @@ function parsePlainText(raw: string, warnings: string[]): Cue[] {
   return cues;
 }
 
-function parseLrc(raw: string, warnings: string[]): Cue[] {
+function parseLrc(raw: string, warnings: string[], language: SourceLanguage): Cue[] {
   const cues: Cue[] = [];
   const timePattern = /\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
   const enhancedTimePattern = /<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>/g;
@@ -206,7 +208,7 @@ function parseLrc(raw: string, warnings: string[]): Cue[] {
     timedLines += 1;
     const text = cleanCueText(line.replace(timePattern, "").replace(enhancedTimePattern, ""));
     if (!text) continue;
-    const duration = estimateDurationSeconds(text);
+    const duration = estimateDurationSeconds(text, language);
     starts.forEach((start) => cues.push({ id: cues.length, start, end: start + duration, text }));
   }
 
@@ -215,12 +217,70 @@ function parseLrc(raw: string, warnings: string[]): Cue[] {
   return cues;
 }
 
-function estimateDurationSeconds(text: string): number {
+export function detectSourceLanguage(text: string): string {
+  const kana = (text.match(/[\u3040-\u30ff\u31f0-\u31ff]/g) ?? []).length;
+  const hangul = (text.match(/[\uac00-\ud7af]/g) ?? []).length;
+  const han = (text.match(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g) ?? []).length;
+  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+  const total = Array.from(text).length;
+  if (hangul >= 2 && hangul * 3 >= Math.max(1, total)) return "ko";
+  if (kana >= 2 && (kana + han) * 3 >= Math.max(1, total)) return "ja";
+  if (han >= 2 && latin * 3 < total) return "zh";
+  if (latin >= 2) {
+    const words = ` ${text.toLowerCase().replace(/[^a-z]+/g, " ")} `;
+    const stopWords = [" the ", " and ", " you ", " to ", " of ", " is ", " in ", " that ", " it ", " for ", " on ", " with ", " was ", " this ", " have ", " not "]
+      .filter((word) => words.includes(word)).length;
+    return stopWords >= 2 ? "en" : "other";
+  }
+  return "other";
+}
+
+function estimateDurationSeconds(text: string, requestedLanguage: SourceLanguage): number {
   const compact = text.replace(/\s+/g, "");
+  const language = requestedLanguage === "auto" ? detectSourceLanguage(text) : requestedLanguage;
+  const japaneseCharacters = (compact.match(/[\u3040-\u30ff\u31f0-\u31ff]/g) ?? []).length;
+  const koreanCharacters = (compact.match(/[\uac00-\ud7af]/g) ?? []).length;
   const cjkCharacters = (compact.match(/[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/g) ?? []).length;
-  const otherCharacters = Math.max(0, Array.from(compact).length - cjkCharacters);
-  const estimated = cjkCharacters / 4 + otherCharacters / 10;
+  const totalCharacters = Array.from(compact).length;
+  const words = text.match(/[A-Za-z0-9]+/g)?.length ?? 0;
+  let estimated: number;
+  if (language === "ja") estimated = japaneseCharacters / 6 + Math.max(0, totalCharacters - japaneseCharacters) / 10;
+  else if (language === "ko") estimated = koreanCharacters / 5 + Math.max(0, totalCharacters - koreanCharacters) / 10;
+  else if (language === "en") estimated = words / 2.6;
+  else if (language === "zh") estimated = cjkCharacters / 4 + Math.max(0, totalCharacters - cjkCharacters) / 10;
+  else estimated = totalCharacters / 10;
   return Math.max(1.2, Math.min(12, estimated));
+}
+
+export function retimeEstimatedCues(
+  cues: Cue[],
+  format: SubtitleFormat,
+  requestedLanguage: SourceLanguage,
+): void {
+  if (!cues.length || (format !== "lrc" && format !== "txt")) return;
+  if (format === "txt") {
+    let cursor = 0.6;
+    cues.forEach((cue) => {
+      const duration = estimateDurationSeconds(cue.text, requestedLanguage);
+      cue.start = cursor;
+      cue.end = cursor + duration;
+      cursor += duration + 0.2;
+    });
+    return;
+  }
+  cues.sort((a, b) => a.start - b.start);
+  const retimed = cues.map((cue, index) => {
+    let nominal = estimateDurationSeconds(cue.text, requestedLanguage);
+    const next = cues.slice(index + 1).find((candidate) => candidate.start > cue.start + 0.02);
+    if (next) {
+      const gap = next.start - cue.start;
+      const available = Math.max(0.6, gap - 0.35);
+      // The next LRC timestamp is safer than text-length estimation, even for long gaps.
+      nominal = available;
+    }
+    return { ...cue, end: cue.start + Math.max(0.6, nominal) };
+  });
+  cues.splice(0, cues.length, ...retimed);
 }
 
 function normalize(cues: Cue[], warnings: string[]): Cue[] {
@@ -248,7 +308,11 @@ function normalize(cues: Cue[], warnings: string[]): Cue[] {
   return out;
 }
 
-export function parseSubtitles(raw: string, fileName: string): SubtitleParseResult {
+export function parseSubtitles(
+  raw: string,
+  fileName: string,
+  sourceLanguage: SourceLanguage = "auto",
+): SubtitleParseResult {
   const warnings: string[] = [];
   const ext = (fileName.split(".").pop() || "").toLowerCase();
   const format: SubtitleFormat =
@@ -274,8 +338,8 @@ export function parseSubtitles(raw: string, fileName: string): SubtitleParseResu
 
   let cues: Cue[] = [];
   if (format === "ass") cues = parseAss(raw);
-  else if (format === "lrc") cues = parseLrc(raw, warnings);
-  else if (format === "txt") cues = parsePlainText(raw, warnings);
+  else if (format === "lrc") cues = parseLrc(raw, warnings, sourceLanguage);
+  else if (format === "txt") cues = parsePlainText(raw, warnings, sourceLanguage);
   else cues = parseTimedBlocks(raw);
 
   if (!cues.length && format !== "txt") {
@@ -286,7 +350,14 @@ export function parseSubtitles(raw: string, fileName: string): SubtitleParseResu
     }
   }
 
-  return { format, cues: normalize(cues, warnings), warnings };
+  const normalized = normalize(cues, warnings);
+  retimeEstimatedCues(normalized, format, sourceLanguage);
+  return {
+    format,
+    cues: normalized,
+    warnings,
+    sourceLanguage: detectSourceLanguage(raw),
+  };
 }
 
 /** Decode a subtitle file, honouring BOMs and falling back to GB18030 for legacy CN files. */

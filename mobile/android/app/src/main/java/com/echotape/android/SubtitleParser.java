@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 
 /** Native subtitle decoder/parser used by the Android Views UI. */
 public final class SubtitleParser {
+    private static final double LRC_BOUNDARY_GAP_SECONDS = 0.35;
     private static final Pattern CLOCK = Pattern.compile(
         "^(?:(\\d+):)?(\\d{1,2}):(\\d{1,2})(?:[.,](\\d{1,3}))?$"
     );
@@ -66,6 +67,10 @@ public final class SubtitleParser {
     }
 
     public static Result parse(String raw, String fileName) {
+        return parse(raw, fileName, "auto");
+    }
+
+    public static Result parse(String raw, String fileName, String requestedLanguage) {
         List<String> warnings = new ArrayList<>();
         String normalized = raw.replace("\r\n", "\n").replace('\r', '\n');
         String extension = "";
@@ -110,7 +115,10 @@ public final class SubtitleParser {
             }
         }
 
-        return new Result(format, normalize(cues, warnings), warnings);
+        List<Cue> normalizedCues = normalize(cues, warnings);
+        String detectedLanguage = detectSourceLanguage(raw);
+        retimeEstimatedCues(normalizedCues, format, requestedLanguage);
+        return new Result(format, normalizedCues, warnings, detectedLanguage);
     }
 
     private static List<Cue> parseTimedBlocks(String raw) {
@@ -243,7 +251,7 @@ public final class SubtitleParser {
         for (String line : raw.split("\\n")) {
             String text = line.trim();
             if (text.isEmpty()) continue;
-            double duration = estimateDurationSeconds(text);
+            double duration = estimateDurationSeconds(text, "auto");
             cues.add(new Cue(cues.size(), cursor, cursor + duration, text));
             cursor += duration + 0.2;
         }
@@ -284,7 +292,7 @@ public final class SubtitleParser {
             text = LRC_ENHANCED_TIME.matcher(text).replaceAll("");
             text = cleanText(text);
             if (text.isEmpty()) continue;
-            double duration = estimateDurationSeconds(text);
+            double duration = estimateDurationSeconds(text, "auto");
             for (double start : starts) {
                 cues.add(new Cue(cues.size(), start, start + duration, text));
             }
@@ -294,13 +302,113 @@ public final class SubtitleParser {
         return cues;
     }
 
-    private static double estimateDurationSeconds(String text) {
+    public static void retimeEstimatedCues(List<Cue> cues, String format, String requestedLanguage) {
+        if (cues == null || cues.isEmpty()) return;
+        if (!"lrc".equals(format) && !"txt".equals(format)) return;
+
+        if ("txt".equals(format)) {
+            double cursor = 0.6;
+            List<Cue> retimed = new ArrayList<>();
+            for (Cue cue : cues) {
+                double duration = estimateDurationSeconds(cue.text, requestedLanguage);
+                retimed.add(new Cue(cue.id, cursor, cursor + duration, cue.text));
+                cursor += duration + 0.2;
+            }
+            cues.clear();
+            cues.addAll(retimed);
+            return;
+        }
+
+        cues.sort(Comparator.comparingDouble(cue -> cue.start));
+        List<Cue> retimed = new ArrayList<>();
+        for (int i = 0; i < cues.size(); i++) {
+            Cue cue = cues.get(i);
+            double nominal = estimateDurationSeconds(cue.text, requestedLanguage);
+            double nextStart = Double.NaN;
+            for (int j = i + 1; j < cues.size(); j++) {
+                if (cues.get(j).start > cue.start + 0.02) {
+                    nextStart = cues.get(j).start;
+                    break;
+                }
+            }
+            if (Double.isFinite(nextStart)) {
+                double gap = nextStart - cue.start;
+                double available = Math.max(0.6, gap - LRC_BOUNDARY_GAP_SECONDS);
+                // LRC has no real end time. The next timestamp is safer than a text-length estimate,
+                // especially when the source performance pauses or stretches syllables.
+                nominal = available;
+            }
+            retimed.add(new Cue(cue.id, cue.start, cue.start + Math.max(0.6, nominal), cue.text));
+        }
+        cues.clear();
+        cues.addAll(retimed);
+    }
+
+    public static String detectSourceLanguage(String text) {
+        int kana = 0;
+        int hangul = 0;
+        int han = 0;
+        int latin = 0;
+        int total = 0;
+        for (int offset = 0; text != null && offset < text.length(); ) {
+            int codePoint = text.codePointAt(offset);
+            total += 1;
+            if (
+                (codePoint >= 0x3040 && codePoint <= 0x30ff) ||
+                (codePoint >= 0x31f0 && codePoint <= 0x31ff)
+            ) {
+                kana += 1;
+            } else if (codePoint >= 0xac00 && codePoint <= 0xd7af) {
+                hangul += 1;
+            } else if (
+                (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
+                (codePoint >= 0x4e00 && codePoint <= 0x9fff) ||
+                (codePoint >= 0xf900 && codePoint <= 0xfaff)
+            ) {
+                han += 1;
+            } else if (
+                (codePoint >= 'A' && codePoint <= 'Z') ||
+                (codePoint >= 'a' && codePoint <= 'z')
+            ) {
+                latin += 1;
+            }
+            offset += Character.charCount(codePoint);
+        }
+        if (hangul >= 2 && hangul * 3 >= Math.max(1, total)) return "ko";
+        if (kana >= 2 && (kana + han) * 3 >= Math.max(1, total)) return "ja";
+        if (han >= 2 && latin * 3 < total) return "zh";
+        if (latin >= 2) {
+            String lower = " " + text.toLowerCase(Locale.ROOT).replaceAll("[^a-z]+", " ") + " ";
+            int stopWords = 0;
+            for (String word : new String[] {
+                " the ", " and ", " you ", " to ", " of ", " is ", " in ", " that ", " it ", " for ",
+                " on ", " with ", " was ", " this ", " have ", " not "
+            }) {
+                if (lower.contains(word)) stopWords += 1;
+            }
+            return stopWords >= 2 ? "en" : "other";
+        }
+        return "other";
+    }
+
+    private static double estimateDurationSeconds(String text, String requestedLanguage) {
         String compact = text.replaceAll("\\s+", "");
+        String language = requestedLanguage == null || requestedLanguage.isEmpty() || "auto".equals(requestedLanguage)
+            ? detectSourceLanguage(text)
+            : requestedLanguage;
         int cjkCharacters = 0;
+        int japaneseCharacters = 0;
+        int koreanCharacters = 0;
+        int latinCharacters = 0;
+        int wordCount = 0;
+        boolean inWord = false;
         int totalCharacters = 0;
         for (int offset = 0; offset < compact.length(); ) {
             int codePoint = compact.codePointAt(offset);
             totalCharacters += 1;
+            boolean latin = false;
+            boolean japanese = false;
+            boolean korean = false;
             if (
                 (codePoint >= 0x3000 && codePoint <= 0x303f) ||
                 (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
@@ -310,10 +418,45 @@ public final class SubtitleParser {
             ) {
                 cjkCharacters += 1;
             }
+            if (
+                (codePoint >= 0x3040 && codePoint <= 0x30ff) ||
+                (codePoint >= 0x31f0 && codePoint <= 0x31ff)
+            ) {
+                japanese = true;
+                japaneseCharacters += 1;
+            }
+            if (codePoint >= 0xac00 && codePoint <= 0xd7af) {
+                korean = true;
+                koreanCharacters += 1;
+            }
+            if (
+                (codePoint >= 'A' && codePoint <= 'Z') ||
+                (codePoint >= 'a' && codePoint <= 'z') ||
+                (codePoint >= '0' && codePoint <= '9')
+            ) {
+                latin = true;
+                latinCharacters += 1;
+            }
+            if (latin && !inWord) {
+                wordCount += 1;
+                inWord = true;
+            } else if (!latin) {
+                inWord = false;
+            }
             offset += Character.charCount(codePoint);
         }
-        int otherCharacters = Math.max(0, totalCharacters - cjkCharacters);
-        double estimated = cjkCharacters / 4.0 + otherCharacters / 10.0;
+        double estimated;
+        if ("ja".equals(language)) {
+            estimated = japaneseCharacters / 6.0 + Math.max(0, totalCharacters - japaneseCharacters) / 10.0;
+        } else if ("ko".equals(language)) {
+            estimated = koreanCharacters / 5.0 + Math.max(0, totalCharacters - koreanCharacters) / 10.0;
+        } else if ("en".equals(language)) {
+            estimated = wordCount / 2.6;
+        } else if ("zh".equals(language)) {
+            estimated = cjkCharacters / 4.0 + Math.max(0, totalCharacters - cjkCharacters) / 10.0;
+        } else {
+            estimated = totalCharacters / 10.0;
+        }
         return Math.max(1.2, Math.min(12.0, estimated));
     }
 
@@ -421,11 +564,13 @@ public final class SubtitleParser {
         public final String format;
         public final List<Cue> cues;
         public final List<String> warnings;
+        public final String detectedLanguage;
 
-        Result(String format, List<Cue> cues, List<String> warnings) {
+        Result(String format, List<Cue> cues, List<String> warnings, String detectedLanguage) {
             this.format = format;
             this.cues = cues;
             this.warnings = warnings;
+            this.detectedLanguage = detectedLanguage;
         }
     }
 }

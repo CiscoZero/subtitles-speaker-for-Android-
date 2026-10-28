@@ -109,6 +109,8 @@ public class MainActivity extends AppCompatActivity {
 
     private Switch autoPauseSwitch;
     private Spinner voiceSpinner;
+    private Spinner sourceLanguageSpinner;
+    private TextView sourceLanguageStatus;
     private TextView ttsStateText;
     private TextView ttsRateValue;
     private TextView ttsVolumeValue;
@@ -144,6 +146,9 @@ public class MainActivity extends AppCompatActivity {
     private float playbackRate = 1f;
     private String expiredPolicy = "read-all";
     private String triggerMode = "end";
+    private double finalLrcCueStart = -1;
+    private String sourceLanguage = "auto";
+    private String detectedSourceLanguage = "";
     private String voiceName = "";
 
     private String transport = "idle";
@@ -625,6 +630,55 @@ public class MainActivity extends AppCompatActivity {
         triggerCard.addView(triggerModeGroup);
         page.addView(triggerCard, topMarginParams(0, dp(8)));
 
+        page.addView(sectionTitle("原音频语言"), topMarginParams(0, dp(18)));
+        LinearLayout languageCard = card();
+        languageCard.addView(text("用于估算 LRC/TXT 的原句结束时间", 14, ESPRESSO, Typeface.BOLD));
+        languageCard.addView(
+            text("VTT/SRT/ASS 有真实结束时间，不受本项影响", 10.5f, MUTED, Typeface.NORMAL),
+            topMarginParams(0, dp(3))
+        );
+        sourceLanguageSpinner = new Spinner(this);
+        String[] languageLabels = { "自动识别", "中文", "日语", "韩语", "英语", "其他语言" };
+        String[] languageCodes = { "auto", "zh", "ja", "ko", "en", "other" };
+        ArrayAdapter<String> languageAdapter = new ArrayAdapter<>(
+            this,
+            android.R.layout.simple_spinner_item,
+            languageLabels
+        );
+        languageAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        bindingSettings = true;
+        sourceLanguageSpinner.setAdapter(languageAdapter);
+        sourceLanguageSpinner.setSelection(indexOfLanguage(languageCodes, sourceLanguage));
+        bindingSettings = false;
+        sourceLanguageSpinner.setOnItemSelectedListener(
+            new android.widget.AdapterView.OnItemSelectedListener() {
+                @Override
+                public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                    if (bindingSettings || position < 0 || position >= languageCodes.length) return;
+                    sourceLanguage = languageCodes[position];
+                    retimeEstimatedCues();
+                    sortCuesForTriggerMode();
+                    rebuildCueRows();
+                    persistSettings();
+                    withService(service -> {
+                        service.updateSettings(settingsJson());
+                        service.replaceCues(new ArrayList<>(cues));
+                    });
+                }
+
+                @Override
+                public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+            }
+        );
+        languageCard.addView(sourceLanguageSpinner, topMarginParams(0, dp(8), ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+        sourceLanguageStatus = text("", 10.5f, MUTED, Typeface.NORMAL);
+        languageCard.addView(sourceLanguageStatus, topMarginParams(0, dp(4)));
+        languageCard.addView(
+            text("LRC 使用下一行前 0.35 秒作为边界；只有最后一行和 TXT 才按语言字数估算", 10.5f, MUTED, Typeface.NORMAL),
+            topMarginParams(0, dp(3))
+        );
+        page.addView(languageCard, topMarginParams(0, dp(8)));
+
         page.addView(sectionTitle("屏蔽词"), topMarginParams(0, dp(18)));
         LinearLayout blockedCard = card();
         blockedCard.addView(text("包含屏蔽词的字幕不朗读", 14, ESPRESSO, Typeface.BOLD));
@@ -875,6 +929,8 @@ public class MainActivity extends AppCompatActivity {
                 if (!warning.isEmpty()) subtitleWarnings.add(warning);
             }
         }
+        detectedSourceLanguage = detectCuesLanguage();
+        retimeEstimatedCues();
         sortCuesForTriggerMode();
         refreshSourceCards();
         rebuildCueRows();
@@ -1017,6 +1073,7 @@ public class MainActivity extends AppCompatActivity {
         cueEmpty.setVisibility(cues.isEmpty() ? View.VISIBLE : View.GONE);
         cueRowsScroll.setVisibility(cues.isEmpty() ? View.GONE : View.VISIBLE);
         cueSearch.setVisibility(cues.isEmpty() ? View.GONE : View.VISIBLE);
+        updateSourceLanguageStatus();
     }
 
     private void rebuildCueRows() {
@@ -1174,7 +1231,11 @@ public class MainActivity extends AppCompatActivity {
                 byte[] bytes = readBytes(uri);
                 SubtitleParser.DecodedText decoded = SubtitleParser.decode(bytes);
                 String[] description = describeUri(uri);
-                SubtitleParser.Result parsed = SubtitleParser.parse(decoded.text, description[0]);
+                    SubtitleParser.Result parsed = SubtitleParser.parse(
+                        decoded.text,
+                        description[0],
+                        sourceLanguage
+                    );
                 ui.post(() -> {
                     setSubtitleLoading(false);
                     if (parsed.cues.isEmpty()) {
@@ -1193,6 +1254,7 @@ public class MainActivity extends AppCompatActivity {
                     subtitleName = description[0];
                     subtitleFormat = parsed.format;
                     subtitleEncoding = decoded.encoding;
+                        detectedSourceLanguage = parsed.detectedLanguage;
                     subtitleWarnings = parsed.warnings;
                     cues.clear();
                     cues.addAll(parsed.cues);
@@ -1262,6 +1324,8 @@ public class MainActivity extends AppCompatActivity {
         subtitleWarnings = new ArrayList<>(item.warnings);
         cues.clear();
         cues.addAll(item.cues);
+        detectedSourceLanguage = detectCuesLanguage();
+        retimeEstimatedCues();
         sortCuesForTriggerMode();
         refreshSourceCards();
         rebuildCueRows();
@@ -1495,6 +1559,7 @@ public class MainActivity extends AppCompatActivity {
             settings.put("ttsVolume", ttsVolume);
             settings.put("expiredPolicy", expiredPolicy);
             settings.put("triggerMode", triggerMode);
+            settings.put("sourceLanguage", sourceLanguage);
             settings.put("blockedWords", new JSONArray(blockedWords));
         } catch (JSONException ignored) {}
         return settings;
@@ -1509,6 +1574,7 @@ public class MainActivity extends AppCompatActivity {
         ttsPitch = prefs.getFloat("ttsPitch", 1f);
         expiredPolicy = prefs.getString("expiredPolicy", "read-all");
         triggerMode = "start".equals(prefs.getString("triggerMode", "end")) ? "start" : "end";
+        sourceLanguage = normalizeSourceLanguage(prefs.getString("sourceLanguage", "auto"));
         voiceName = prefs.getString("voiceName", "");
         blockedWords.clear();
         String savedWords = prefs.getString("blockedWords", "[]");
@@ -1531,6 +1597,7 @@ public class MainActivity extends AppCompatActivity {
             .putFloat("ttsPitch", ttsPitch)
             .putString("expiredPolicy", expiredPolicy)
             .putString("triggerMode", triggerMode)
+            .putString("sourceLanguage", sourceLanguage)
             .putString("voiceName", voiceName)
             .putString("blockedWords", new JSONArray(blockedWords).toString())
             .apply();
@@ -1559,6 +1626,11 @@ public class MainActivity extends AppCompatActivity {
             RadioButton end = (RadioButton) triggerModeGroup.getChildAt(1);
             (triggerMode.equals("end") ? end : start).setChecked(true);
         }
+        if (sourceLanguageSpinner != null) {
+            String[] codes = { "auto", "zh", "ja", "ko", "en", "other" };
+            sourceLanguageSpinner.setSelection(indexOfLanguage(codes, sourceLanguage));
+        }
+        updateSourceLanguageStatus();
         bindingSettings = false;
         renderBlockedWords();
     }
@@ -1930,15 +2002,92 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private double cueTrigger(Cue cue) {
-        return "end".equals(triggerMode) ? cue.end : cue.start;
+        if (!"end".equals(triggerMode)) return cue.start;
+        if (
+            "lrc".equals(subtitleFormat) &&
+            finalLrcCueStart >= 0 &&
+            Math.abs(cue.start - finalLrcCueStart) < 0.001 &&
+            durationMs > 0
+        ) {
+            return Math.max(cue.start, durationMs / 1000.0 - 0.35);
+        }
+        return cue.end;
+    }
+
+    private void retimeEstimatedCues() {
+        if ("lrc".equals(subtitleFormat) || "txt".equals(subtitleFormat)) {
+            SubtitleParser.retimeEstimatedCues(cues, subtitleFormat, sourceLanguage);
+        }
+        if ("auto".equals(sourceLanguage)) {
+            detectedSourceLanguage = detectCuesLanguage();
+        }
+        updateSourceLanguageStatus();
+    }
+
+    private String detectCuesLanguage() {
+        StringBuilder sample = new StringBuilder();
+        for (Cue cue : cues) {
+            if (sample.length() >= 20000) break;
+            if (sample.length() > 0) sample.append('\n');
+            sample.append(cue.text);
+        }
+        return SubtitleParser.detectSourceLanguage(sample.toString());
+    }
+
+    private void updateSourceLanguageStatus() {
+        if (sourceLanguageStatus == null) return;
+        if (cues.isEmpty()) {
+            sourceLanguageStatus.setText("装入 LRC/TXT 后会按该语言估算结束时间");
+            return;
+        }
+        if (!"lrc".equals(subtitleFormat) && !"txt".equals(subtitleFormat)) {
+            sourceLanguageStatus.setText("当前字幕使用文件中的真实结束时间");
+            return;
+        }
+        String language = "auto".equals(sourceLanguage) ? detectedSourceLanguage : sourceLanguage;
+        sourceLanguageStatus.setText(
+            ("auto".equals(sourceLanguage) ? "自动识别：" : "计时语言：") + sourceLanguageLabel(language)
+        );
+    }
+
+    private String sourceLanguageLabel(String code) {
+        if ("zh".equals(code)) return "中文";
+        if ("ja".equals(code)) return "日语";
+        if ("ko".equals(code)) return "韩语";
+        if ("en".equals(code)) return "英语";
+        if ("other".equals(code)) return "其他语言";
+        return "未确定";
+    }
+
+    private String normalizeSourceLanguage(String code) {
+        for (String candidate : new String[] { "auto", "zh", "ja", "ko", "en", "other" }) {
+            if (candidate.equals(code)) return candidate;
+        }
+        return "auto";
+    }
+
+    private int indexOfLanguage(String[] codes, String code) {
+        for (int i = 0; i < codes.length; i++) {
+            if (codes[i].equals(code)) return i;
+        }
+        return 0;
     }
 
     private void sortCuesForTriggerMode() {
+        updateFinalLrcCueStart();
         cues.sort(
             Comparator
                 .comparingDouble(this::cueTrigger)
                 .thenComparingDouble(cue -> cue.start)
         );
+    }
+
+    private void updateFinalLrcCueStart() {
+        finalLrcCueStart = -1;
+        if (!"lrc".equals(subtitleFormat)) return;
+        for (Cue cue : cues) {
+            finalLrcCueStart = Math.max(finalLrcCueStart, cue.start);
+        }
     }
 
     private static String formatClock(int seconds) {

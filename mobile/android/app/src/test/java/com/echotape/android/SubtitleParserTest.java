@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import org.junit.Test;
 
 public class SubtitleParserTest {
@@ -81,7 +82,7 @@ public class SubtitleParserTest {
         assertEquals(0.7, result.cues.get(0).start, 0.001);
         assertEquals(5.0, result.cues.get(1).start, 0.001);
         assertEquals("同一句歌词", result.cues.get(0).text);
-        assertEquals(1.25, result.cues.get(0).end - result.cues.get(0).start, 0.001);
+        assertEquals(3.95, result.cues.get(0).end - result.cues.get(0).start, 0.001);
         assertEquals("第二句", result.cues.get(2).text);
         assertEquals(1.2, result.cues.get(2).end - result.cues.get(2).start, 0.001);
     }
@@ -97,5 +98,39 @@ public class SubtitleParserTest {
 
         assertEquals(1, result.cues.size());
         assertEquals("正文", result.cues.get(0).text);
+    }
+
+    @Test
+    public void detectsChineseJapaneseKoreanAndEnglish() {
+        assertEquals("zh", SubtitleParser.detectSourceLanguage("这是中文歌词"));
+        assertEquals("ja", SubtitleParser.detectSourceLanguage("これは日本語の歌です"));
+        assertEquals("ko", SubtitleParser.detectSourceLanguage("이것은 한국어 노래입니다"));
+        assertEquals(
+            "en",
+            SubtitleParser.detectSourceLanguage("This is the song that you have heard")
+        );
+    }
+
+    @Test
+    public void languageEstimateIsCappedByNextLrcTimestamp() {
+        ArrayList<Cue> cues = new ArrayList<>();
+        cues.add(new Cue(0, 10, 14, "あいうえおか"));
+        cues.add(new Cue(1, 11, 15, "つぎのうた"));
+
+        SubtitleParser.retimeEstimatedCues(cues, "lrc", "auto");
+
+        assertEquals(10.65, cues.get(0).end, 0.001);
+        assertEquals(12.2, cues.get(1).end, 0.001);
+    }
+
+    @Test
+    public void longLrcGapStillWaitsForNextTimestamp() {
+        ArrayList<Cue> cues = new ArrayList<>();
+        cues.add(new Cue(0, 0, 14, "这是中文歌词"));
+        cues.add(new Cue(1, 20, 24, "第二句"));
+
+        SubtitleParser.retimeEstimatedCues(cues, "lrc", "zh");
+
+        assertEquals(19.65, cues.get(0).end, 0.001);
     }
 }

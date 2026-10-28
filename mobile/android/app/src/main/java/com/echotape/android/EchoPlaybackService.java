@@ -5,8 +5,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
-import android.media.MediaPlayer;
-import android.media.PlaybackParams;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -20,6 +18,8 @@ import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.Player;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.PlaybackParameters;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.session.MediaSession;
 import androidx.media3.session.MediaSessionService;
@@ -95,6 +95,7 @@ public class EchoPlaybackService extends MediaSessionService {
 
     private boolean autoPause = true;
     private double offsetMs;
+    private double finalLrcCueStart = -1;
     private float playbackRate = 1f;
     private float ttsRate = 1f;
     private float ttsPitch = 1f;
@@ -106,7 +107,7 @@ public class EchoPlaybackService extends MediaSessionService {
     private boolean internalPause;
     private long lastPositionSaveAtMs;
     private final Map<String, File> pendingSpeechFiles = new HashMap<>();
-    private MediaPlayer synthesizedSpeechPlayer;
+    private ExoPlayer synthesizedSpeechPlayer;
     private File playingSynthesizedFile;
 
     private final Runnable ticker = new Runnable() {
@@ -321,6 +322,7 @@ public class EchoPlaybackService extends MediaSessionService {
         audioUri = nextAudioUri.toString();
         audioName = nextAudioName == null ? "" : nextAudioName;
         readSourceMetadata(source);
+        updateFinalLrcCueStart();
         pointer = 0;
         activeCue = -1;
         lastBlockedCue = -1;
@@ -356,6 +358,7 @@ public class EchoPlaybackService extends MediaSessionService {
         cancelSpeech();
         speechQueue.clear();
         cues.clear();
+        finalLrcCueStart = -1;
         audioUri = "";
         audioName = "";
         subtitleName = "";
@@ -513,6 +516,32 @@ public class EchoPlaybackService extends MediaSessionService {
         }
     }
 
+    public void replaceCues(List<Cue> nextCues) {
+        requireMainThread();
+        boolean wasAutoPaused = autoPause && "paused".equals(transport) && "auto".equals(pauseReason);
+        cancelSpeech();
+        speechQueue.clear();
+        cues.clear();
+        cues.addAll(nextCues);
+        updateFinalLrcCueStart();
+        sortCuesByTriggerMode();
+        long currentPosition = player == null ? 0 : player.getCurrentPosition();
+        pointer = findNextIndex(currentPosition / 1000.0, false);
+        activeCue = -1;
+        lastBlockedCue = -1;
+        speech = "idle";
+        if (wasAutoPaused && player != null) {
+            pauseReason = "none";
+            transport = "playing";
+            player.play();
+            handler.removeCallbacks(ticker);
+            handler.post(ticker);
+        }
+        persistSessionSource();
+        savePlaybackPosition(true);
+        emitState();
+    }
+
     public void setVoice(String nextVoiceName) {
         requireMainThread();
         voiceName = nextVoiceName == null ? "" : nextVoiceName;
@@ -588,7 +617,21 @@ public class EchoPlaybackService extends MediaSessionService {
         configureTts();
         Bundle params = new Bundle();
         params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, ttsVolume);
-        return tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, "echo-preview-" + (++speechToken)) != TextToSpeech.ERROR;
+        String utteranceId = "echo-preview-" + (++speechToken);
+        if (shouldUseSynthesizedPlayback()) {
+            File file = new File(getCacheDir(), utteranceId + ".wav");
+            pendingSpeechFiles.put(utteranceId, file);
+            int result = tts.synthesizeToFile(text, params, file, utteranceId);
+            if (result == TextToSpeech.ERROR) {
+                pendingSpeechFiles.remove(utteranceId);
+                if (file.exists()) file.delete();
+                tts.setSpeechRate(ttsRate);
+                tts.setPitch(ttsPitch);
+                return tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId) != TextToSpeech.ERROR;
+            }
+            return true;
+        }
+        return tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId) != TextToSpeech.ERROR;
     }
 
     private void tick() {
@@ -693,8 +736,13 @@ public class EchoPlaybackService extends MediaSessionService {
     }
 
     private void onTtsDone(String utteranceId) {
-        if (utteranceId.startsWith("echo-preview-")) return;
         File synthesizedFile = pendingSpeechFiles.remove(utteranceId);
+        if (utteranceId.startsWith("echo-preview-")) {
+            if (synthesizedFile != null && synthesizedFile.exists()) {
+                playSynthesizedSegment(synthesizedFile, utteranceId);
+            }
+            return;
+        }
         int token = utteranceToken(utteranceId);
         if (speechJob == null || token != speechJob.token) {
             if (synthesizedFile != null && synthesizedFile.exists()) synthesizedFile.delete();
@@ -718,9 +766,9 @@ public class EchoPlaybackService extends MediaSessionService {
     }
 
     private void onTtsError(String utteranceId) {
-        if (utteranceId.startsWith("echo-preview-")) return;
         File synthesizedFile = pendingSpeechFiles.remove(utteranceId);
         if (synthesizedFile != null && synthesizedFile.exists()) synthesizedFile.delete();
+        if (utteranceId.startsWith("echo-preview-")) return;
         int token = utteranceToken(utteranceId);
         if (speechJob == null || token != speechJob.token) return;
         failSpeech("Android 系统语音朗读失败，请检查中文语音设置");
@@ -728,42 +776,42 @@ public class EchoPlaybackService extends MediaSessionService {
 
     private void playSynthesizedSegment(File file, String utteranceId) {
         stopSynthesizedSpeechPlayback();
-        MediaPlayer player = new MediaPlayer();
+        ExoPlayer player = new ExoPlayer.Builder(this)
+            .setAudioAttributes(
+                new AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
+                    .build(),
+                false
+            )
+            .build();
         synthesizedSpeechPlayer = player;
         playingSynthesizedFile = file;
-        player.setAudioAttributes(
-            new android.media.AudioAttributes.Builder()
-                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
+        player.setVolume(ttsVolume);
+        player.setPlaybackParameters(
+            new PlaybackParameters(
+                (float) clamp(ttsRate, 0.5, 2.0),
+                (float) clamp(ttsPitch, 0.5, 2.0)
+            )
         );
-        player.setVolume(ttsVolume, ttsVolume);
-        player.setOnPreparedListener(prepared -> {
-            if (synthesizedSpeechPlayer != prepared) return;
-            try {
-                PlaybackParams params = new PlaybackParams()
-                    .setSpeed((float) clamp(ttsRate, 0.5, 2.0))
-                    .setPitch((float) clamp(ttsPitch, 0.5, 2.0));
-                prepared.setPlaybackParams(params);
-                prepared.start();
-            } catch (RuntimeException error) {
-                failSynthesizedSpeech("当前系统不支持应用层变速播放", file);
-                return;
+        player.addListener(new Player.Listener() {
+            @Override
+            public void onPlaybackStateChanged(int playbackState) {
+                if (playbackState != Player.STATE_ENDED || synthesizedSpeechPlayer != player) return;
+                releaseSynthesizedPlayer(player, file);
+                completeSpeechSegment(utteranceId);
+            }
+
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                if (synthesizedSpeechPlayer != player) return;
+                failSynthesizedSpeech("朗读音频播放失败", file);
             }
         });
-        player.setOnCompletionListener(completed -> {
-            if (synthesizedSpeechPlayer != completed) return;
-            releaseSynthesizedPlayer(completed, file);
-            completeSpeechSegment(utteranceId);
-        });
-        player.setOnErrorListener((failed, what, extra) -> {
-            if (synthesizedSpeechPlayer != failed) return true;
-            failSynthesizedSpeech("朗读音频播放失败", file);
-            return true;
-        });
         try {
-            player.setDataSource(file.getAbsolutePath());
-            player.prepareAsync();
+            player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)));
+            player.prepare();
+            player.play();
         } catch (Exception error) {
             failSynthesizedSpeech("无法播放系统语音生成的音频", file);
         }
@@ -775,10 +823,7 @@ public class EchoPlaybackService extends MediaSessionService {
         failSpeech(message);
     }
 
-    private void releaseSynthesizedPlayer(MediaPlayer player, File file) {
-        player.setOnPreparedListener(null);
-        player.setOnCompletionListener(null);
-        player.setOnErrorListener(null);
+    private void releaseSynthesizedPlayer(ExoPlayer player, File file) {
         player.release();
         if (synthesizedSpeechPlayer == player) synthesizedSpeechPlayer = null;
         if (playingSynthesizedFile == file) playingSynthesizedFile = null;
@@ -786,17 +831,12 @@ public class EchoPlaybackService extends MediaSessionService {
     }
 
     private void stopSynthesizedSpeechPlayback() {
-        MediaPlayer player = synthesizedSpeechPlayer;
+        ExoPlayer player = synthesizedSpeechPlayer;
         File file = playingSynthesizedFile;
         synthesizedSpeechPlayer = null;
         playingSynthesizedFile = null;
         if (player != null) {
-            player.setOnPreparedListener(null);
-            player.setOnCompletionListener(null);
-            player.setOnErrorListener(null);
-            try {
-                player.stop();
-            } catch (IllegalStateException ignored) {}
+            player.stop();
             player.release();
         }
         if (file != null && file.exists()) file.delete();
@@ -917,6 +957,7 @@ public class EchoPlaybackService extends MediaSessionService {
             audioUri = restoredAudioUri;
             audioName = root.optString("audioName", "");
             readSourceMetadata(root.optJSONObject("source"));
+            updateFinalLrcCueStart();
 
             SharedPreferences prefs = sessionPreferences();
             String settingsRaw = prefs.getString(PREF_SETTINGS, null);
@@ -1253,7 +1294,27 @@ public class EchoPlaybackService extends MediaSessionService {
     }
 
     private double cueTrigger(Cue cue) {
-        return "end".equals(triggerMode) ? cue.end : cue.start;
+        if (!"end".equals(triggerMode)) return cue.start;
+        if (
+            "lrc".equals(subtitleFormat) &&
+            finalLrcCueStart >= 0 &&
+            Math.abs(cue.start - finalLrcCueStart) < 0.001 &&
+            player != null
+        ) {
+            long duration = player.getDuration();
+            if (duration > 0 && duration != C.TIME_UNSET) {
+                return Math.max(cue.start, duration / 1000.0 - 0.35);
+            }
+        }
+        return cue.end;
+    }
+
+    private void updateFinalLrcCueStart() {
+        finalLrcCueStart = -1;
+        if (!"lrc".equals(subtitleFormat)) return;
+        for (Cue cue : cues) {
+            finalLrcCueStart = Math.max(finalLrcCueStart, cue.start);
+        }
     }
 
     private void sortCuesByTriggerMode() {
