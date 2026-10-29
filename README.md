@@ -51,6 +51,7 @@ mobile/android/app/src/main/java/com/echotape/android/
   EchoPlaybackService.java   Media3、MediaSession、TTS 和字幕时钟
   SubtitleParser.java        原生字幕解析和编码识别
   RecentStore.java           最近音频与最近字幕本地存储
+  PlaybackBackgroundRules.java 后台播放与任务移除规则
   PlaybackRecoveryRules.java 进程恢复规则
 ```
 

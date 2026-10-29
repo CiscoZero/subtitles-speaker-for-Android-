@@ -1,6 +1,14 @@
-# 译声机 EchoTape 字幕朗读机 Android v1.5.6
+# 译声机 EchoTape 字幕朗读机 Android v1.5.7
 
 ## 主要更新
+
+### 后台与息屏播放
+
+- 原声播放及自动暂停等待 TTS 期间持有专用 Partial WakeLock。
+- 连续播放时定时刷新 WakeLock，避免长时间息屏后被系统休眠中断。
+- 划掉后台任务时，活跃的播放或朗读不会立即交给 Media3 默认逻辑停止服务。
+- 系统 TTS 改用辅助语音音频属性，降低与主播放器抢占音频焦点的概率。
+- 增加播放状态、音频焦点和 WakeLock 日志，便于继续排查厂商系统限制。
 
 ### LRC 朗读时机
 
@@ -43,11 +51,11 @@
 
 ## 安装
 
-下载 `EchoTape-1.5.6-debug.apk` 后覆盖安装。
+下载 `EchoTape-1.5.7-debug.apk` 后覆盖安装。
 
 ```text
-versionName: 1.5.6
-versionCode: 20
+versionName: 1.5.7
+versionCode: 21
 package: com.echotape.android
 minSdk: 26
 targetSdk: 36
@@ -56,12 +64,13 @@ targetSdk: 36
 ## SHA-256
 
 ```text
-6927475155D4C659A8D0B1C4F5A1DEAC035EAED7116BDBA14DA788482C040288
+DD2E58398343B6AE579F38EF698ED74FF5BF9DB0841D5D0E56787A740BF5E695
 ```
 
 ## 验证
 
 - 已通过 Redmi Note 12 Turbo 真机测试。
 - 共享解析与状态机测试 26 项通过。
-- Android 原生测试 14 项通过。
+- Android 原生测试新增 4 项后台播放规则测试通过。
+- 后台与息屏播放修复仍需要在 Redmi Note 12 Turbo 上完成 20–30 分钟复测。
 - APK 使用 Android Debug 签名，适合测试和侧载安装。

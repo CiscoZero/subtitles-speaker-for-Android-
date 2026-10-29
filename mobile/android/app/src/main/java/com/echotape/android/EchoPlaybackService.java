@@ -8,6 +8,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
@@ -51,6 +52,7 @@ public class EchoPlaybackService extends MediaSessionService {
     private static final double TRIGGER_EARLY_SECONDS = 0.012;
     private static final double MAX_SNAP_BACK_SECONDS = 1.2;
     private static final long POSITION_SAVE_INTERVAL_MS = 2000;
+    private static final long WAKE_LOCK_TIMEOUT_MS = 30L * 60L * 1000L;
     private static final long MAX_SESSION_FILE_BYTES = 40L * 1024 * 1024;
     private static final String SESSION_FILE = "echo-session.v1.json";
     private static final String SESSION_TEMP_FILE = "echo-session.v1.json.tmp";
@@ -109,6 +111,8 @@ public class EchoPlaybackService extends MediaSessionService {
     private final Map<String, File> pendingSpeechFiles = new HashMap<>();
     private ExoPlayer synthesizedSpeechPlayer;
     private File playingSynthesizedFile;
+    private PowerManager.WakeLock playbackWakeLock;
+    private long lastWakeLockRefreshAtMs;
 
     private final Runnable ticker = new Runnable() {
         @Override
@@ -134,6 +138,15 @@ public class EchoPlaybackService extends MediaSessionService {
         super.onCreate();
         instance = this;
 
+        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+        if (powerManager != null) {
+            playbackWakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "EchoTape:Playback"
+            );
+            playbackWakeLock.setReferenceCounted(false);
+        }
+
         AudioAttributes audioAttributes = new AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
@@ -146,6 +159,15 @@ public class EchoPlaybackService extends MediaSessionService {
         player.addListener(new Player.Listener() {
             @Override
             public void onIsPlayingChanged(boolean isPlaying) {
+                Log.i(
+                    TAG,
+                    "isPlaying=" + isPlaying +
+                        " playWhenReady=" + player.getPlayWhenReady() +
+                        " playbackState=" + player.getPlaybackState() +
+                        " internalPause=" + internalPause +
+                        " transport=" + transport +
+                        " pauseReason=" + pauseReason
+                );
                 if (isPlaying) {
                     transport = "playing";
                     if (!"auto".equals(pauseReason)) pauseReason = "none";
@@ -157,6 +179,11 @@ public class EchoPlaybackService extends MediaSessionService {
                 }
                 savePlaybackPosition(true);
                 emitState();
+            }
+
+            @Override
+            public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
+                Log.i(TAG, "playWhenReady=" + playWhenReady + " reason=" + reason);
             }
 
             @Override
@@ -280,6 +307,7 @@ public class EchoPlaybackService extends MediaSessionService {
     public void onDestroy() {
         savePlaybackPosition(true);
         cancelSpeech();
+        releasePlaybackWakeLock();
         handler.removeCallbacksAndMessages(null);
         if (mediaSession != null) {
             mediaSession.release();
@@ -303,6 +331,10 @@ public class EchoPlaybackService extends MediaSessionService {
     @Override
     public void onTaskRemoved(@Nullable Intent rootIntent) {
         savePlaybackPosition(true);
+        if (!PlaybackBackgroundRules.shouldStopServiceOnTaskRemoved(transport, pauseReason, speech)) {
+            Log.i(TAG, "Keeping playback service after task removal");
+            return;
+        }
         super.onTaskRemoved(rootIntent);
     }
 
@@ -779,11 +811,12 @@ public class EchoPlaybackService extends MediaSessionService {
         ExoPlayer player = new ExoPlayer.Builder(this)
             .setAudioAttributes(
                 new AudioAttributes.Builder()
-                    .setUsage(C.USAGE_MEDIA)
+                    .setUsage(C.USAGE_ASSISTANCE_ACCESSIBILITY)
                     .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
                     .build(),
                 false
             )
+            .setWakeMode(C.WAKE_MODE_LOCAL)
             .build();
         synthesizedSpeechPlayer = player;
         playingSynthesizedFile = file;
@@ -1207,7 +1240,7 @@ public class EchoPlaybackService extends MediaSessionService {
         float synthesisPitch = synthesizedPlayback ? 1f : ttsPitch;
         tts.setAudioAttributes(
             new android.media.AudioAttributes.Builder()
-                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .setUsage(android.media.AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
                 .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
         );
@@ -1337,7 +1370,42 @@ public class EchoPlaybackService extends MediaSessionService {
     }
 
     private void emitState() {
+        syncPlaybackWakeLock();
         EchoPlaybackBus.publishState(getState());
+    }
+
+    private void syncPlaybackWakeLock() {
+        boolean shouldHold = PlaybackBackgroundRules.shouldKeepPlaybackAwake(
+            transport,
+            pauseReason,
+            speech
+        );
+        if (!shouldHold) {
+            releasePlaybackWakeLock();
+            return;
+        }
+        if (playbackWakeLock == null) return;
+
+        long now = System.currentTimeMillis();
+        boolean refresh = playbackWakeLock.isHeld() &&
+            now - lastWakeLockRefreshAtMs >= WAKE_LOCK_TIMEOUT_MS / 2;
+        if (!playbackWakeLock.isHeld()) {
+            playbackWakeLock.acquire(WAKE_LOCK_TIMEOUT_MS);
+            lastWakeLockRefreshAtMs = now;
+            Log.i(TAG, "Playback wake lock acquired");
+        } else if (refresh) {
+            playbackWakeLock.release();
+            playbackWakeLock.acquire(WAKE_LOCK_TIMEOUT_MS);
+            lastWakeLockRefreshAtMs = now;
+            Log.i(TAG, "Playback wake lock refreshed");
+        }
+    }
+
+    private void releasePlaybackWakeLock() {
+        if (playbackWakeLock == null || !playbackWakeLock.isHeld()) return;
+        playbackWakeLock.release();
+        lastWakeLockRefreshAtMs = 0;
+        Log.i(TAG, "Playback wake lock released");
     }
 
     private void requireMainThread() {
